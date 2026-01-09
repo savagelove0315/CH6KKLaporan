@@ -1,79 +1,75 @@
 """
 Google Services Connection Module
-处理 Google Sheets 和 Google Drive 的所有交互
+Handles interactions with Google Sheets and Google Drive using Service Account.
+Supports Dual-Mode Authentication: Streamlit Cloud (st.secrets) & Local (JSON file).
 """
 
+import streamlit as st
+import json
 import os
-import os
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 import gspread
 import pandas as pd
+from google.oauth2.service_account import Credentials
 
 # Google API Scopes
-# 注意：使用完整的 drive 权限而非 drive.file 以避免配额死锁
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive'  # 完整 Drive 权限
+    'https://www.googleapis.com/auth/drive'
 ]
 
 def get_credentials():
     """
-    获取 Google OAuth 2.0 用户凭证
-    使用主账号的配额，避免 Service Account 的 0GB 限制
+    Get Google OAuth 2.0 Credentials (Service Account).
     
-    认证流程：
-    1. 检查是否存在 token.json（已保存的凭证）
-    2. 如果凭证过期，自动刷新
-    3. 如果没有凭证，启动浏览器让用户授权
-    4. 保存凭证到 token.json 供下次使用
+    Logic:
+    1. Cloud Mode: Check st.secrets["gcp_service_account"]
+    2. Local Mode: Check client_secrets.json or service_account.json
+    3. Error: Raise FileNotFoundError if neither exists
     """
     creds = None
     
-    # 如果已有 token.json，直接加载
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-        print("✅ 使用已保存的用户凭证 (token.json)")
+    # 1. Cloud Mode: Streamlit Secrets
+    if "gcp_service_account" in st.secrets:
+        try:
+            # Create a dict from the secrets object
+            service_account_info = dict(st.secrets["gcp_service_account"])
+            creds = Credentials.from_service_account_info(
+                service_account_info, 
+                scopes=SCOPES
+            )
+            print("✅ Loaded credentials from st.secrets (Cloud Mode)")
+            return creds
+        except Exception as e:
+            print(f"⚠️ Error loading from st.secrets: {e}")
     
-    # 如果没有有效凭据，则让用户登录
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            print("🔄 刷新过期的凭证...")
-            creds.refresh(Request())
-            print("✅ 凭证刷新成功")
-        else:
-            # 使用下载的 client_secrets.json 发起流程
-            if not os.path.exists('client_secrets.json'):
-                raise FileNotFoundError(
-                    "未找到 client_secrets.json 文件！\n"
-                    "请从 Google Cloud Console 下载 OAuth 2.0 客户端密钥\n"
-                    "https://console.cloud.google.com/apis/credentials"
+    # 2. Local Mode: JSON File Fallback
+    # Check common filenames
+    json_files = ['client_secrets.json', 'service_account.json', 'credentials.json']
+    for filename in json_files:
+        if os.path.exists(filename):
+            try:
+                creds = Credentials.from_service_account_file(
+                    filename, 
+                    scopes=SCOPES
                 )
-            
-            print("🌐 启动 OAuth 2.0 授权流程...")
-            print("   浏览器将自动打开，请登录您的 Google 账号并授权")
-            
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'client_secrets.json', SCOPES)
-            creds = flow.run_local_server(port=0, prompt='consent', access_type='offline')
-            
-            print("✅ 授权成功！")
-            
-        # 保存凭据供下次使用
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
-        print("💾 凭证已保存到 token.json")
-            
-    return creds
+                print(f"✅ Loaded credentials from local file: {filename}")
+                return creds
+            except Exception as e:
+                print(f"⚠️ Error loading {filename}: {e}")
+
+    # 3. Critical Error
+    raise FileNotFoundError(
+        "❌ Unable to find valid credentials!\n"
+        "1. Cloud: Ensure 'gcp_service_account' is in .streamlit/secrets.toml\n"
+        "2. Local: Ensure 'client_secrets.json' or 'service_account.json' exists."
+    )
 
 def get_config():
     """
-    获取配置信息（Spreadsheet ID, Drive Folder ID, Admin Password）
+    Get configuration (Spreadsheet ID, Drive Folder ID, Admin Password).
     """
     try:
-        import streamlit as st
-        # 优先读取 [connections] 部分
+        # Priority: [connections] section
         if "connections" in st.secrets:
             secrets = st.secrets["connections"]
             return {
@@ -81,7 +77,7 @@ def get_config():
                 'drive_folder_id': secrets.get('google_drive_folder_id'),
                 'admin_password': secrets.get('admin_password', 'admin123')
             }
-        # 兼容旧配置 [google_config]
+        # Backward Compatibility: [google_config]
         elif "google_config" in st.secrets:
             return {
                 'spreadsheet_id': st.secrets['google_config']['spreadsheet_id'],
@@ -94,99 +90,75 @@ def get_config():
             'admin_password': None
         }
     except:
-        # 本地开发模式返回空配置
+        # Local dev fallback if secrets missing completely
         return {
             'spreadsheet_id': None,
             'drive_folder_id': None,
             'admin_password': None
         }
 
+# ==============================================================================
+# WRAPPER FUNCTIONS (Using new get_credentials)
+# ==============================================================================
 
 def save_to_sheets(data_dict, spreadsheet_id=None):
-    """
-    保存数据到 Google Sheets
-    
-    Args:
-        data_dict: 数据字典，键为列名
-        spreadsheet_id: Spreadsheet ID（可选，不提供则从配置读取）
-    """
+    """Save data to Google Sheets."""
     try:
         credentials = get_credentials()
         gc = gspread.authorize(credentials)
         
-        # 获取 spreadsheet ID
         if spreadsheet_id is None:
             config = get_config()
             spreadsheet_id = config['spreadsheet_id']
-            if spreadsheet_id is None:
-                raise ValueError("未配置 spreadsheet_id")
+            if not spreadsheet_id:
+                raise ValueError("Missing spreadsheet_id")
         
-        # 打开工作表
         sh = gc.open_by_key(spreadsheet_id)
         worksheet = sh.sheet1
         
-        # 准备行数据（按列顺序）
+        # Prepare headers if empty
         headers = worksheet.row_values(1)
         if not headers:
-            # 如果没有表头，使用数据字典的键作为表头
             headers = list(data_dict.keys())
             worksheet.append_row(headers)
         
-        # 按表头顺序准备数据
-        row_data = [data_dict.get(header, '') for header in headers]
+        # Align data with headers
+        row_data = [data_dict.get(h, '') for h in headers]
         
-        # 追加行
         worksheet.append_row(row_data)
-        print("✅ 数据保存成功")
+        print("✅ Data saved successfully")
         
     except Exception as e:
-        print(f"❌ 保存数据失败: {str(e)}")
-        raise Exception(f"Sheets 写入失败: {str(e)}")
+        print(f"❌ Save failed: {str(e)}")
+        raise Exception(f"Sheets Write Error: {str(e)}")
 
 def load_data(spreadsheet_id=None):
-    """
-    从 Google Sheets 加载所有数据
-    
-    Args:
-        spreadsheet_id: Spreadsheet ID（可选）
-    
-    Returns:
-        pd.DataFrame: 数据框架
-    """
+    """Load all data as DataFrame."""
     try:
         credentials = get_credentials()
         gc = gspread.authorize(credentials)
         
-        # 获取 spreadsheet ID
         if spreadsheet_id is None:
             config = get_config()
             spreadsheet_id = config['spreadsheet_id']
-            if spreadsheet_id is None:
-                raise ValueError("未配置 spreadsheet_id")
+            if not spreadsheet_id:
+                raise ValueError("Missing spreadsheet_id")
         
-        # 打开工作表
         sh = gc.open_by_key(spreadsheet_id)
         worksheet = sh.sheet1
         
-        # 获取所有记录
         records = worksheet.get_all_records()
         df = pd.DataFrame(records)
         
-        print(f"✅ 加载数据成功: {len(df)} 行")
+        print(f"✅ Data loaded: {len(df)} rows")
         return df
         
     except Exception as e:
-        print(f"❌ 加载数据失败: {str(e)}")
-        raise Exception(f"Sheets 读取失败: {str(e)}")
+        print(f"❌ Load failed: {str(e)}")
+        raise Exception(f"Sheets Read Error: {str(e)}")
 
 def append_data_to_sheet(data_row, spreadsheet_id=None):
-    """
-    向 Google Sheets 追加一行数据
-    
-    Args:
-        data_row: 数据列表 (List)
-        spreadsheet_id: 可选，指定表格 ID
-    """
+    """Append a raw list as a row."""
     try:
         if spreadsheet_id is None:
             config = get_config()
@@ -195,44 +167,23 @@ def append_data_to_sheet(data_row, spreadsheet_id=None):
         credentials = get_credentials()
         gc = gspread.authorize(credentials)
         
-        # 打开工作表
         sh = gc.open_by_key(spreadsheet_id)
         worksheet = sh.sheet1
         
-        # 追加数据
         worksheet.append_row(data_row)
-        print(f"✅ 数据写入成功: {data_row}")
+        print(f"✅ Row appended: {data_row}")
         return True
         
     except Exception as e:
-        print(f"❌ 数据写入失败: {str(e)}")
-        raise Exception(f"Sheets 写入失败: {str(e)}")
+        print(f"❌ Append failed: {str(e)}")
+        raise Exception(f"Sheets Append Error: {str(e)}")
 
 def read_all_data(spreadsheet_id=None):
-    """
-    读取所有数据并返回 DataFrame
-    """
-    try:
-        if spreadsheet_id is None:
-            config = get_config()
-            spreadsheet_id = config['spreadsheet_id']
-            
-        credentials = get_credentials()
-        gc = gspread.authorize(credentials)
-        
-        sh = gc.open_by_key(spreadsheet_id)
-        worksheet = sh.sheet1
-        
-        records = worksheet.get_all_records()
-        return pd.DataFrame(records)
-    except Exception as e:
-        print(f"❌ 读取数据失败: {str(e)}")
-        raise Exception(f"读取失败: {str(e)}")
+    """Alias for load_data logic but returns DataFrame."""
+    return load_data(spreadsheet_id)
 
 def update_sheet(dataframe, spreadsheet_id=None):
-    """
-    更新整个工作表（保留表头）
-    """
+    """Update entire sheet with DataFrame content."""
     try:
         if spreadsheet_id is None:
             config = get_config()
@@ -244,18 +195,17 @@ def update_sheet(dataframe, spreadsheet_id=None):
         sh = gc.open_by_key(spreadsheet_id)
         worksheet = sh.sheet1
         
-        # 准备数据：表头 + 内容
+        # Prepare data: Header + Rows
         data = [dataframe.columns.values.tolist()] + dataframe.values.tolist()
         
-        # 清空并更新
         worksheet.clear()
         worksheet.update(data)
-        print("✅ 数据更新成功")
+        print("✅ Sheet updated successfully")
         return True
     except Exception as e:
-        print(f"❌ 更新数据失败: {str(e)}")
-        raise Exception(f"更新失败: {str(e)}")
+        print(f"❌ Update failed: {str(e)}")
+        raise Exception(f"Sheet Update Error: {str(e)}")
 
 if __name__ == "__main__":
-    print("Connection module loaded successfully!")
-    print(f"Scopes: {SCOPES}")
+    print("Connection module loaded.")
+
