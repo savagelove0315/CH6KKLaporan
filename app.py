@@ -511,8 +511,8 @@ def main():
     
     st.markdown("""
         <div style='text-align: center; background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 25px;'>
-            <h1 style='color: #0e1117; margin:0;'>🏫 Sistem Pengurusan Kokurikulum</h1>
-            <p style='color: #555; margin:5px;'>Jana Laporan & Sijil Pencapaian Pelajar</p>
+            <h1 style='color: #0e1117; margin:0;'>🏫 Sistem Laporan Kokurikulum</h1>
+            <p style='color: #555; margin:5px;'>Jana Laporan Kokurikulum</p>
         </div>
     """, unsafe_allow_html=True)
     
@@ -530,3 +530,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
